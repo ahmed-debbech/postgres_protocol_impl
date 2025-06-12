@@ -9,10 +9,10 @@ import (
 	"github.com/xdg-go/scram"
 )
 
-var username string = "postgres"
-var password string = "postgres"
-var databaseName string = "postgres"
-var host string = "localhost:5432"
+var username string = "bctlgpuw"
+var password string = "begpcuofnkamymknrful"
+var databaseName string = "ohuiujfc"
+var host string = "alpha.europe.mkdb.sh:5432"
 
 var chFromServer = make(chan []byte)
 
@@ -157,7 +157,7 @@ func process(i int , responseServer []byte) []byte {
 		data = clientFinal
 	}
 
-	if i == 3 { // need to process the final messages (AuthenticationSASLFinal (B) + AuthenticationOk (B) + BackendKeyData (B) + ReadyForQuery (B)) before starting using 
+	if i == 3 { // need to process the final messages (AuthenticationSASLFinal (B) + AuthenticationOk (B) + ParameterStatus (B) + BackendKeyData (B) + ReadyForQuery (B)) before starting using 
 		getReady(responseServer)
 	}
 	return data
@@ -165,8 +165,43 @@ func process(i int , responseServer []byte) []byte {
 
 func getReady(finalAuthMsg []byte) {
 	
+	authSucc := false
 	//processing AuthenticationSASLFinal (actually skiping it because we trust the server)
-	
+	saslFinalLen := bytesToInt32(finalAuthMsg[1:5])
+	if finalAuthMsg[0] == 'R' {
+		authSucc = true
+	}else{
+		log.Println("COULD NOT AUTHENTICATE AS USER",username )
+		return
+	}
+
+	//processing AuthenticationOK
+	authOk := finalAuthMsg[saslFinalLen+1:]
+	if authOk[0] == 'R' {
+		authSucc = true
+	}else{
+		authSucc = false
+	}
+
+	isAuthOk := authOk[5:bytesToInt32(authOk[1:5])+1] 
+	if bytesToInt32(isAuthOk) == 0 && authSucc {
+		log.Println("SUCCESSFUL AUTHENTICATION OK AS USER", username)
+	}else{
+		log.Println("COULD NOT AUTHENTICATE AS USER",username )
+	}
+
+	//process ParameterStatus (B) 
+	ParameterStatus := authOk[9:]
+	log.Printf("% x\n", backend) 
+}
+
+func bytesToInt32(b []byte) int32 {
+	var l int32 = 0;
+	l |= int32((b[0] << 24))
+	l |= int32((b[1] << 16))
+	l |= int32((b[2]) << 8)
+	l |= int32((b[3] << 0))
+	return l
 }
 
 func computeClientProof(xx string) []byte {
