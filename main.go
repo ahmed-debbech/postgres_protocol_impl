@@ -5,6 +5,7 @@ import (
 	"net"
 	"time"
 	"bytes"
+	"strings"
 	"encoding/binary"
 	"github.com/xdg-go/scram"
 )
@@ -157,42 +158,75 @@ func process(i int , responseServer []byte) []byte {
 		data = clientFinal
 	}
 
-	if i == 3 { // need to process the final messages (AuthenticationSASLFinal (B) + AuthenticationOk (B) + ParameterStatus (B) + BackendKeyData (B) + ReadyForQuery (B)) before starting using 
+	if i == 3 { // need to process the final message before starting using 
 		getReady(responseServer)
 	}
 	return data
 }
 
-func getReady(finalAuthMsg []byte) {
+/* 
+*	this function getReady is written to deconstruct the final tcp packet from the SASL mechanism.
+* 	this packet that we will deconstruct contains (AuthenticationSASLFinal (B) + AuthenticationOk (B) + ParameterStatus (B) + BackendKeyData (B) + ReadyForQuery (B)) consecutively
+*/
+func getReady(finalAuthMsg []byte) { 
 	
-	authSucc := false
-	//processing AuthenticationSASLFinal (actually skiping it because we trust the server)
+	//processing AuthenticationSASLFinal (R) (actually skiping it because we trust the server)
 	saslFinalLen := bytesToInt32(finalAuthMsg[1:5])
 	if finalAuthMsg[0] == 'R' {
-		authSucc = true
+		log.Println("SUCCESSFUL AUTHENTICATION OK AS USER 1/2", username)
 	}else{
 		log.Println("COULD NOT AUTHENTICATE AS USER",username )
 		return
 	}
+	finalAuthMsg = finalAuthMsg[saslFinalLen+1:]
 
-	//processing AuthenticationOK
-	authOk := finalAuthMsg[saslFinalLen+1:]
-	if authOk[0] == 'R' {
-		authSucc = true
-	}else{
-		authSucc = false
-	}
-
-	isAuthOk := authOk[5:bytesToInt32(authOk[1:5])+1] 
-	if bytesToInt32(isAuthOk) == 0 && authSucc {
-		log.Println("SUCCESSFUL AUTHENTICATION OK AS USER", username)
+	//processing AuthenticationOK (R)
+	if finalAuthMsg[0] == 'R' && bytesToInt32(finalAuthMsg[5:bytesToInt32(finalAuthMsg[1:5])+1]) == 0 {
+		log.Println("SUCCESSFUL AUTHENTICATION OK AS USER 2/2", username)
 	}else{
 		log.Println("COULD NOT AUTHENTICATE AS USER",username )
+		return
+	}
+	authOKLen := bytesToInt32(finalAuthMsg[1:5])
+	finalAuthMsg = finalAuthMsg[authOKLen+1:]
+
+	//process ParameterStatus (S) 
+	isParamStat := false
+	if finalAuthMsg[0] == 'S' {
+		isParamStat = true
+	}else{
+		log.Println("NO ParamStatus were received")
+	}
+	for isParamStat {
+		paramLen := bytesToInt32(finalAuthMsg[1:5])
+		st := finalAuthMsg[5:paramLen+1]
+		newSt := strings.ReplaceAll(string(st), "\x00", "")
+		log.Printf("Param Status %s\n", []byte(newSt))
+		finalAuthMsg = finalAuthMsg[paramLen+1:]
+		if finalAuthMsg[0] != 'S' {
+			isParamStat = false
+		}
 	}
 
-	//process ParameterStatus (B) 
-	ParameterStatus := authOk[9:]
-	log.Printf("% x\n", backend) 
+	//process BackendKeyData(K)
+	if finalAuthMsg[0] == 'K' {
+		keyLen := bytesToInt32(finalAuthMsg[1:5])
+		procid := bytesToInt32(finalAuthMsg[5:9])
+		procsec := bytesToInt32(finalAuthMsg[9:13])
+		log.Printf("BackendKeyData: process id: %d\n", procid)
+		log.Printf("BackendKeyData: process secret: %d\n", procsec)
+		finalAuthMsg = finalAuthMsg[keyLen+1:]
+	}else{
+		log.Println("NO BackendKeyData!")
+	}
+
+	//process ReadyForQuery(Z)
+	if finalAuthMsg[0] == 'Z' {
+		log.Printf("ReadyForQuery: %c\n", finalAuthMsg[len(finalAuthMsg)-1])
+		log.Println("ReadyForQuery: (NOTE) 'I' server ready. 'T' server is processing a trx bloc. 'E' server in failed trx block")
+	}else{
+		log.Println("Did not receive ReadyForQuery, server may not be ready yet.")
+	}
 }
 
 func bytesToInt32(b []byte) int32 {
