@@ -15,6 +15,8 @@ var password string = "begpcuofnkamymknrful"
 var databaseName string = "ohuiujfc"
 var host string = "alpha.europe.mkdb.sh:5432"
 
+var query string = "SELECT 1;"
+
 var chFromServer = make(chan []byte)
 
 var clientFinal = make([]byte, 0)
@@ -159,16 +161,58 @@ func process(i int , responseServer []byte) []byte {
 	}
 
 	if i == 3 { // need to process the final message before starting using 
-		getReady(responseServer)
+		if getReady(responseServer) {
+			data = sendFirstQuery()
+		}
+	}
+
+	if i == 4 {
+		if getResponseUponQuery(responseServer) {
+			data = []byte{}
+		}
 	}
 	return data
 }
 
+func getResponseUponQuery(serverResp []byte) bool {
+	
+	log.Println("Parsing response from server after seding the query:", query)
+
+	// parsing the RowDescription (T)
+	RowDescLen := bytesToInt32(serverResp[1:5])
+	if serverResp[0] != 'T' {
+		for 
+	}else{
+		log.Println("there is NO RowDescription, possibly empty data? or an error?")
+		return false
+	}
+
+	return true
+}
+
+func sendFirstQuery() []byte {
+
+	log.Println("Sending query:", query)
+	data := make([]byte, 0)
+
+	data = append(data, 0x51)
+
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, int32(5+len(query)))
+	data = append(data, buf.Bytes()...)
+
+	data = append(data, []byte(query)...)
+	data = append(data, 0x00)
+	return data
+}
+
+
 /* 
 *	this function getReady is written to deconstruct the final tcp packet from the SASL mechanism.
 * 	this packet that we will deconstruct contains (AuthenticationSASLFinal (B) + AuthenticationOk (B) + ParameterStatus (B) + BackendKeyData (B) + ReadyForQuery (B)) consecutively
+*	it return true if everything is okay and ready to send first query
 */
-func getReady(finalAuthMsg []byte) { 
+func getReady(finalAuthMsg []byte) bool{ 
 	
 	//processing AuthenticationSASLFinal (R) (actually skiping it because we trust the server)
 	saslFinalLen := bytesToInt32(finalAuthMsg[1:5])
@@ -176,7 +220,7 @@ func getReady(finalAuthMsg []byte) {
 		log.Println("SUCCESSFUL AUTHENTICATION OK AS USER 1/2", username)
 	}else{
 		log.Println("COULD NOT AUTHENTICATE AS USER",username )
-		return
+		return false
 	}
 	finalAuthMsg = finalAuthMsg[saslFinalLen+1:]
 
@@ -185,7 +229,7 @@ func getReady(finalAuthMsg []byte) {
 		log.Println("SUCCESSFUL AUTHENTICATION OK AS USER 2/2", username)
 	}else{
 		log.Println("COULD NOT AUTHENTICATE AS USER",username )
-		return
+		return false
 	}
 	authOKLen := bytesToInt32(finalAuthMsg[1:5])
 	finalAuthMsg = finalAuthMsg[authOKLen+1:]
@@ -226,7 +270,9 @@ func getReady(finalAuthMsg []byte) {
 		log.Println("ReadyForQuery: (NOTE) 'I' server ready. 'T' server is processing a trx bloc. 'E' server in failed trx block")
 	}else{
 		log.Println("Did not receive ReadyForQuery, server may not be ready yet.")
+		return false
 	}
+	return true
 }
 
 func bytesToInt32(b []byte) int32 {
@@ -235,6 +281,14 @@ func bytesToInt32(b []byte) int32 {
 	l |= int32((b[1] << 16))
 	l |= int32((b[2]) << 8)
 	l |= int32((b[3] << 0))
+	return l
+}
+
+
+func bytesToInt16(b []byte) int16 {
+	var l int16 = 0;
+	l |= int16((b[0]) << 8)
+	l |= int16((b[1] << 0))
 	return l
 }
 
