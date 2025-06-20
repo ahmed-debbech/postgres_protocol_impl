@@ -41,7 +41,7 @@ func main(){
 			if err != nil {
 				log.Println("Error Reading:", err)
 			}
-			log.Printf("Received: [%s]\n", buffer[:n])
+			log.Printf("Received: [% x]\n", buffer[:n])
 
 			chFromServer <- buffer[:n]
 			time.Sleep(time.Second * 1)
@@ -180,8 +180,23 @@ func getResponseUponQuery(serverResp []byte) bool {
 
 	// parsing the RowDescription (T)
 	RowDescLen := bytesToInt32(serverResp[1:5])
-	if serverResp[0] != 'T' {
-		for 
+	log.Printf("%d\n", RowDescLen)
+	
+	if serverResp[0] == 'T' {
+		numberOfCol := int(bytesToInt16(serverResp[5:7]))
+		log.Printf("there are exactly %d columns in this response\n", numberOfCol)
+		
+		for i:=0; i<numberOfCol; i++{
+			s := ""
+			j := 7
+			for serverResp[j] != 0x00 {
+				s += string(serverResp[j])
+				j++
+			}
+			log.Printf("| %s ", s)
+		}
+		log.Println()
+
 	}else{
 		log.Println("there is NO RowDescription, possibly empty data? or an error?")
 		return false
