@@ -15,10 +15,10 @@ var username string = "bctlgpuw"
 var password string = "begpcuofnkamymknrful"
 var databaseName string = "ohuiujfc"
 var host string = "alpha.europe.mkdb.sh:5432"
+var query string = "select * from test;"
 
-var query string = "select * from users;"
-
-var chFromServer = make(chan []byte)
+var chFromServer = make(chan []byte, 50)
+var prepare = make(chan []byte)
 
 var clientFinal = make([]byte, 0)
 var clientSHA1, _ = scram.SHA256.NewClient(username, password, "")
@@ -26,7 +26,7 @@ var conv = clientSHA1.NewConversation()
 
 func main() {
 	log.Println("hello world")
-	log.Println("**********************************************\n")
+	log.Println("**********************************************")
 
 	conn, err := net.Dial("tcp", host)
 	if err != nil {
@@ -35,7 +35,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	buffer := make([]byte, 1024)
+	buffer := make([]byte, 4096)
 	go func() {
 		for {
 			n, err := conn.Read(buffer)
@@ -44,10 +44,21 @@ func main() {
 			}
 			log.Printf("Received: [%s]\n", buffer[:n])
 
-			chFromServer <- buffer[:n]
+			prepare <- buffer[:n]
 			time.Sleep(time.Second * 1)
 		}
+	}()
 
+	go func() {
+		buf := make([]byte, 0)
+		i := int32(0)
+		for {
+			buf = append(buf, (<-prepare)...)
+			log.Printf("CUTTED: % x\n", buf)
+			chFromServer <- buf[i : i+bytesToInt32(buf[i+1:i+5])+1]
+			log.Printf("CUTTED:SENT:   % x %d\n", buf[i:i+bytesToInt32(buf[i+1:i+5])+1], i)
+			i = i + bytesToInt32(buf[i+1:i+5]) + 1
+		}
 	}()
 
 	go func() {
@@ -68,7 +79,7 @@ func main() {
 
 			log.Println("DONE Step", i+1, "\n\n")
 			i++
-			log.Println("**********************************************\n")
+			log.Println("**********************************************")
 			time.Sleep(time.Second * 2)
 		}
 	}()
@@ -157,12 +168,18 @@ func process(i int, responseServer []byte) []byte {
 	}
 
 	if i == 3 { // need to process the final message before starting using
-		if getReady(responseServer) {
-			data = sendFirstQuery()
+
+		for i := 1; i <= 5; i++ {
+
+			responseServer = <-chFromServer
+
+			if getReady(responseServer) {
+				data = append(data, sendFirstQuery()...)
+			}
 		}
 	}
 
-	if i == 4 {
+	if i >= 4 {
 		if getResponseUponQuery(responseServer) {
 			data = []byte{}
 		}
@@ -269,7 +286,7 @@ func getReady(finalAuthMsg []byte) bool {
 		log.Println("SUCCESSFUL AUTHENTICATION OK AS USER 1/2", username)
 	} else {
 		log.Println("COULD NOT AUTHENTICATE AS USER", username)
-		return false
+		//return false
 	}
 	finalAuthMsg = finalAuthMsg[saslFinalLen+1:]
 
@@ -278,7 +295,7 @@ func getReady(finalAuthMsg []byte) bool {
 		log.Println("SUCCESSFUL AUTHENTICATION OK AS USER 2/2", username)
 	} else {
 		log.Println("COULD NOT AUTHENTICATE AS USER", username)
-		return false
+		//return false
 	}
 	authOKLen := bytesToInt32(finalAuthMsg[1:5])
 	finalAuthMsg = finalAuthMsg[authOKLen+1:]
@@ -319,7 +336,7 @@ func getReady(finalAuthMsg []byte) bool {
 		log.Println("ReadyForQuery: (NOTE) 'I' server ready. 'T' server is processing a trx bloc. 'E' server in failed trx block")
 	} else {
 		log.Println("Did not receive ReadyForQuery, server may not be ready yet.")
-		return false
+		//return false
 	}
 	return true
 }
