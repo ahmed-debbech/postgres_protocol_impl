@@ -16,7 +16,7 @@ var password string = "begpcuofnkamymknrful"
 var databaseName string = "ohuiujfc"
 var host string = "alpha.europe.mkdb.sh:5432"
 
-var query string = "SELECT 1;"
+var query string = "select * from users;"
 
 var chFromServer = make(chan []byte)
 
@@ -182,14 +182,16 @@ func getResponseUponQuery(serverResp []byte) bool {
 		numberOfCol := int(bytesToInt16(serverResp[5:7]))
 		log.Printf("there are exactly %d columns in this response\n", numberOfCol)
 
+		log.Println("--------------------------------------------------------")
+		j := 7
 		for i := 0; i < numberOfCol; i++ {
 			s := ""
-			j := 7
 			for serverResp[j] != 0x00 {
 				s += string(serverResp[j])
 				j++
 			}
 			log.Printf("| %s ", s)
+			j += 19
 		}
 		log.Println()
 
@@ -199,14 +201,42 @@ func getResponseUponQuery(serverResp []byte) bool {
 	}
 	serverResp = serverResp[RowDescLen+1:]
 
-	DataRowLen := bytesToInt32(serverResp[1:5])
-	if serverResp[0] == 'D' {
+	for serverResp[0] == 'D' {
+		numOfCols := int16(0)
+		if serverResp[0] == 'D' {
 
-	} else {
-		log.Println("No Data rows where found")
-		return false
+			numOfCols = bytesToInt16(serverResp[5:7])
+
+			serverResp = serverResp[7:]
+			for i := 0; i <= int(numOfCols)-1; i++ {
+				lenCol := bytesToInt32(serverResp[:4])
+				if lenCol == -1 {
+					log.Print("| NULL")
+				}
+				if lenCol == 0 {
+					log.Print("| -")
+				} else {
+					columnVal := serverResp[4 : 4+lenCol]
+					log.Printf("| %s", string(columnVal))
+				}
+				serverResp = serverResp[4+lenCol:]
+			}
+			log.Println("--------------------------------------------------------")
+			log.Println("There are", numOfCols, "columns in this row")
+
+		} else {
+			log.Println("No Data rows where found")
+			return false
+		}
 	}
 
+	if serverResp[0] == 'C' {
+		log.Println("[DONE] receiving a closing command, the command has been executed")
+		serverResp = serverResp[bytesToInt32(serverResp[1:5])+1:]
+	}
+	if serverResp[0] == 'Z' {
+		log.Println("[READY] ready for query again...")
+	}
 	return true
 }
 
