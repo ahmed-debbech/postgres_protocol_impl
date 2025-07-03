@@ -1,4 +1,4 @@
-package main
+package m
 
 import (
 	"bytes"
@@ -170,7 +170,6 @@ func process(i int, responseServer []byte) []byte {
 	if i == 3 { // need to process the final message before starting using
 
 		for i := 1; i <= 5; i++ {
-
 			responseServer = <-chFromServer
 
 			if getReady(responseServer) {
