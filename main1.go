@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"log"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/xdg-go/scram"
@@ -46,7 +47,16 @@ func main() {
 			}
 			log.Printf("Received: [%s]\n", buffer[:n])
 
-			chFromServer <- buffer[:n]
+			i := 0
+			x := buffer[:n]
+			for i < n && i < 4096 {
+				if (int32(i) + bytesToInt32(x[i+1:i+5]) + 1) >= 4096 {
+					break
+				}
+				currentPacket := x[i : int32(i)+bytesToInt32(x[i+1:i+5])+1]
+				i = int(int32(i) + bytesToInt32(x[i+1:i+5]) + 1)
+				chFromServer <- currentPacket
+			}
 			time.Sleep(time.Second * 1)
 
 		}
@@ -70,6 +80,10 @@ func main() {
 
 	process(0)
 	select {}
+}
+
+func ReadNextPacket() []byte {
+	return <-chFromServer
 }
 
 func process(i int) {
@@ -138,7 +152,6 @@ func process(i int) {
 	data = make([]byte, 0)
 	//log.Println("Computing: client-final")
 	x := responseServer
-	//log.Printf("%s\n", x[11:])
 
 	xx := x[9:]
 	cp := computeClientProof(string(xx))
@@ -153,17 +166,147 @@ func process(i int) {
 	data = clientFinal
 
 	chToServer <- data
+
 	responseServer = ReadNextPacket()
+	//processing AuthenticationSASLFinal (R) (actually skiping it because we trust the server)
+	if responseServer[0] == 'R' {
+		log.Println("SUCCESSFUL AUTHENTICATION OK AS USER 1/2", username)
+	} else {
+		log.Println("COULD NOT AUTHENTICATE AS USER", username)
+		return
+	}
 
-	log.Println(responseServer)
+	responseServer = ReadNextPacket()
+	//processing AuthenticationOK (R)
+	if responseServer[0] == 'R' && bytesToInt32(responseServer[5:bytesToInt32(responseServer[1:5])+1]) == 0 {
+		log.Println("SUCCESSFUL AUTHENTICATION OK AS USER 2/2", username)
+	} else {
+		log.Println("COULD NOT AUTHENTICATE AS USER", username)
+		return
+	}
 
+	responseServer = ReadNextPacket()
+	//process ParameterStatus (S)
+	isParamStat := false
+	if responseServer[0] == 'S' {
+		isParamStat = true
+	} else {
+		log.Println("NO ParamStatus were received")
+	}
+	for isParamStat {
+		st := responseServer[5:]
+		newSt := strings.ReplaceAll(string(st), "\x00", "")
+		log.Printf("Param Status %s\n", []byte(newSt))
+		responseServer = ReadNextPacket()
+		if responseServer[0] != 'S' {
+			isParamStat = false
+		}
+	}
+
+	//process BackendKeyData(K)
+	if responseServer[0] == 'K' {
+		procid := bytesToInt32(responseServer[5:9])
+		procsec := bytesToInt32(responseServer[9:13])
+		log.Printf("BackendKeyData: process id: %d\n", procid)
+		log.Printf("BackendKeyData: process secret: %d\n", procsec)
+	} else {
+		log.Println("NO BackendKeyData!")
+	}
+
+	responseServer = ReadNextPacket()
+	//process ReadyForQuery(Z)
+	if responseServer[0] == 'Z' {
+		log.Printf("ReadyForQuery: %c\n", responseServer[len(responseServer)-1])
+		log.Println("ReadyForQuery: (NOTE) 'I' server ready. 'T' server is processing a trx bloc. 'E' server in failed trx block")
+	} else {
+		log.Println("Did not receive ReadyForQuery, server may not be ready yet.")
+		//return false
+	}
+
+	chToServer <- sendFirstQuery()
+
+	responseServer = ReadNextPacket()
+	log.Println("Parsing response from server after seding the query:", query)
+
+	// parsing the RowDescription (T)
+	if responseServer[0] == 'T' {
+		numberOfCol := int(bytesToInt16(responseServer[5:7]))
+		log.Printf("there are exactly %d columns in this response\n", numberOfCol)
+
+		log.Println("--------------------------------------------------------")
+		j := 7
+		for i := 0; i < numberOfCol; i++ {
+			s := ""
+			for responseServer[j] != 0x00 {
+				s += string(responseServer[j])
+				j++
+			}
+			log.Printf("| %s ", s)
+			j += 19
+		}
+		log.Println()
+
+	} else {
+		log.Println("there is NO RowDescription, possibly empty data? or an error?")
+		return
+	}
+
+	responseServer = ReadNextPacket()
+	for responseServer[0] == 'D' {
+		numOfCols := int16(0)
+		if responseServer[0] == 'D' {
+
+			numOfCols = bytesToInt16(responseServer[5:7])
+
+			responseServer = responseServer[7:]
+			for i := 0; i <= int(numOfCols)-1; i++ {
+				lenCol := bytesToInt32(responseServer[:4])
+				if lenCol == -1 {
+					log.Print("| NULL")
+				}
+				if lenCol == 0 {
+					log.Print("| -")
+				} else {
+					columnVal := responseServer[4 : 4+lenCol]
+					log.Printf("| %s", string(columnVal))
+				}
+				responseServer = responseServer[4+lenCol:]
+			}
+			log.Println("--------------------------------------------------------")
+			log.Println("There are", numOfCols, "columns in this row")
+
+		} else {
+			log.Println("No Data rows where found")
+			return
+		}
+		responseServer = ReadNextPacket()
+	}
+
+	responseServer = ReadNextPacket()
+	if responseServer[0] == 'C' {
+		log.Println("[DONE] receiving a closing command, the command has been executed")
+	}
+
+	responseServer = ReadNextPacket()
+	if responseServer[0] == 'Z' {
+		log.Println("[READY] ready for query again...")
+	}
 }
 
-func ReadNextPacket() []byte {
-	packetsBuffer = append(packetsBuffer, (<-chFromServer)...)
-	currentPacket := packetsBuffer[index : int32(index)+bytesToInt32(packetsBuffer[index+1:index+5])+1]
-	index = int(int32(index) + bytesToInt32(packetsBuffer[index+1:index+5]) + 1)
-	return currentPacket
+func sendFirstQuery() []byte {
+
+	log.Println("Sending query:", query)
+	data := make([]byte, 0)
+
+	data = append(data, 0x51)
+
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, int32(5+len(query)))
+	data = append(data, buf.Bytes()...)
+
+	data = append(data, []byte(query)...)
+	data = append(data, 0x00)
+	return data
 }
 
 func bytesToInt32(b []byte) int32 {
