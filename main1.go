@@ -6,7 +6,6 @@ import (
 	"log"
 	"net"
 	"strings"
-	"time"
 
 	"github.com/xdg-go/scram"
 )
@@ -17,7 +16,7 @@ var databaseName string = "ohuiujfc"
 var host string = "alpha.europe.mkdb.sh:5432"
 var query string = "select * from test;"
 
-var chFromServer = make(chan []byte, 50)
+var chFromServer = make(chan []byte, 500)
 var chToServer = make(chan []byte, 50)
 
 var packetsBuffer = make([]byte, 0)
@@ -40,24 +39,46 @@ func main() {
 
 	buffer := make([]byte, 4096)
 	go func() {
+		uncomplete := make([]byte, 0)
+
 		for {
 			n, err := conn.Read(buffer)
 			if err != nil {
 				log.Println("Error Reading:", err)
 			}
-			log.Printf("Received: [%s]\n", buffer[:n])
+			//log.Printf("Received: [%s]\n", buffer[:n])
 
 			i := 0
 			x := buffer[:n]
-			for i < n && i < 4096 {
-				if (int32(i) + bytesToInt32(x[i+1:i+5]) + 1) >= 4096 {
+			for i < n {
+				if int32(i+5) > int32(n) {
+					uncomplete = append(uncomplete, x[i:]...)
+					//log.Printf("the HEX %d,,  % x", i, uncomplete)
+					//log.Println("breaking i+5")
 					break
 				}
+				if (int32(i) + bytesToInt32(x[i+1:i+5]) + 1) > int32(n) {
+					uncomplete = append(uncomplete, x[i:]...)
+					//log.Printf("the HEX %d,,  % x", i, uncomplete)
+					//log.Println("breaking i n + 5")
+					break
+				}
+				if len(uncomplete) > 0 {
+					n = len(uncomplete) + n
+					x = append(uncomplete, x...)
+					//log.Println("appending uncomplete to x")
+					//log.Printf("ddd % x\n", x)
+				}
+				uncomplete = make([]byte, 0)
 				currentPacket := x[i : int32(i)+bytesToInt32(x[i+1:i+5])+1]
+				//log.Printf("the currectPacket % x", currentPacket)
+				//log.Printf("PACKET BYTE: % x\n", currentPacket[0])
 				i = int(int32(i) + bytesToInt32(x[i+1:i+5]) + 1)
+
 				chFromServer <- currentPacket
 			}
-			time.Sleep(time.Second * 1)
+
+			//time.Sleep(time.Second * 1)
 
 		}
 	}()
@@ -73,8 +94,6 @@ func main() {
 			if err != nil {
 				log.Println("Error Writing:", err)
 			}
-
-			time.Sleep(time.Second * 2)
 		}
 	}()
 
