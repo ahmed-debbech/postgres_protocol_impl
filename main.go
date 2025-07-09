@@ -1,12 +1,12 @@
-package m
+package main
 
 import (
 	"bytes"
 	"encoding/binary"
+	"io"
 	"log"
 	"net"
 	"strings"
-	"time"
 
 	"github.com/xdg-go/scram"
 )
@@ -17,8 +17,10 @@ var databaseName string = "ohuiujfc"
 var host string = "alpha.europe.mkdb.sh:5432"
 var query string = "select * from test;"
 
-var chFromServer = make(chan []byte, 50)
-var prepare = make(chan []byte)
+var chFromServer = make(chan []byte, 500)
+var chToServer = make(chan []byte, 50)
+
+var packetsBuffer = make([]byte, 0)
 
 var clientFinal = make([]byte, 0)
 var clientSHA1, _ = scram.SHA256.NewClient(username, password, "")
@@ -35,175 +37,209 @@ func main() {
 	}
 	defer conn.Close()
 
-	buffer := make([]byte, 4096)
 	go func() {
+
 		for {
-			n, err := conn.Read(buffer)
+			header := make([]byte, 1)
+			_, err := io.ReadFull(conn, header)
 			if err != nil {
 				log.Println("Error Reading:", err)
 			}
-			log.Printf("Received: [%s]\n", buffer[:n])
 
-			prepare <- buffer[:n]
-			time.Sleep(time.Second * 1)
+			length := make([]byte, 4)
+			_, err = io.ReadFull(conn, length)
+			if err != nil {
+				log.Println("Error Reading:", err)
+			}
+
+			rawBytes := make([]byte, bytesToInt32(length)-4)
+			_, err = io.ReadFull(conn, rawBytes)
+			if err != nil {
+				log.Println("Error Reading:", err)
+			}
+
+			currentPacket := append(header, length...)
+			currentPacket = append(currentPacket, rawBytes...)
+
+			chFromServer <- currentPacket
+
 		}
 	}()
 
 	go func() {
-		buf := make([]byte, 0)
-		i := int32(0)
+
 		for {
-			buf = append(buf, (<-prepare)...)
-			log.Printf("CUTTED: % x\n", buf)
-			chFromServer <- buf[i : i+bytesToInt32(buf[i+1:i+5])+1]
-			log.Printf("CUTTED:SENT:   % x %d\n", buf[i:i+bytesToInt32(buf[i+1:i+5])+1], i)
-			i = i + bytesToInt32(buf[i+1:i+5]) + 1
-		}
-	}()
 
-	go func() {
-		i := 0
-		var responseServer = make([]byte, 0)
-		for {
-			log.Println("STARTED Step", i+1)
-
-			data := process(i, responseServer)
-
+			data := <-chToServer
 			log.Printf("Sent: [%s]\n", data)
 			_, err = conn.Write(data)
 			if err != nil {
 				log.Println("Error Writing:", err)
 			}
-
-			responseServer = <-chFromServer
-
-			log.Println("DONE Step", i+1, "\n\n")
-			i++
-			log.Println("**********************************************")
-			time.Sleep(time.Second * 2)
 		}
 	}()
 
+	process(0)
 	select {}
 }
 
-func process(i int, responseServer []byte) []byte {
-
-	data := make([]byte, 0)
-
-	if i == 0 { //Start up message StartupMessage (F) ====> AuthenticationSASL (B)
-
-		buf := new(bytes.Buffer)
-		binary.Write(buf, binary.BigEndian, int32(4+4+4+1+len(username)+1+9+len(databaseName)+2))
-		data = append(data, buf.Bytes()...)
-
-		data = append(data, 0x00)
-		data = append(data, 0x03)
-		data = append(data, 0x00)
-		data = append(data, 0x00)
-
-		//user (key)
-		data = append(data, 0x75)
-		data = append(data, 0x73)
-		data = append(data, 0x65)
-		data = append(data, 0x72)
-		data = append(data, 0x00)
-
-		buf = new(bytes.Buffer)
-		binary.Write(buf, binary.BigEndian, []byte(username))
-		data = append(data, buf.Bytes()...)
-		data = append(data, 0x00)
-
-		//database (key) 64 61 74 61 62 61 73 65
-		data = append(data, 0x64)
-		data = append(data, 0x61)
-		data = append(data, 0x74)
-		data = append(data, 0x61)
-		data = append(data, 0x62)
-		data = append(data, 0x61)
-		data = append(data, 0x73)
-		data = append(data, 0x65)
-		data = append(data, 0x00)
-
-		buf = new(bytes.Buffer)
-		binary.Write(buf, binary.BigEndian, []byte(databaseName))
-		data = append(data, buf.Bytes()...)
-		data = append(data, 0x00)
-
-		data = append(data, 0x00)
-	}
-
-	if i == 1 { //SASLInitialResponse (F) initial message of scram ====>  AuthenticationSASLContinue (B)
-		data = append(data, 0x70)
-
-		data = append(data, 0x00)
-		data = append(data, 0x00)
-		data = append(data, 0x00)
-		data = append(data, 0x46)
-
-		data = append(data, []byte{0x53, 0x43, 0x52, 0x41, 0x4D, 0x2D, 0x53, 0x48, 0x41, 0x2D, 0x32, 0x35, 0x36, 0x00}...)
-		data = append(data, []byte{0x00, 0x00, 0x00, 0x30}...)
-
-		firstMsg, _ := conv.Step("")
-		data = append(data, firstMsg...)
-	}
-
-	if i == 2 { //SASLResponse (F) computing client proof ======> AuthenticationSASLFinal (B) + AuthenticationOk (B) + BackendKeyData (B) + ReadyForQuery (B)
-
-		//log.Println("Computing: client-final")
-		x := responseServer
-		//log.Printf("%s\n", x[11:])
-
-		xx := x[9:]
-		cp := computeClientProof(string(xx))
-		//log.Printf("Client proof [%s]\n", cp)
-
-		clientFinal = append(clientFinal, 'p')
-		buf := new(bytes.Buffer)
-		binary.Write(buf, binary.BigEndian, int32(4+len(cp)))
-		clientFinal = append(clientFinal, buf.Bytes()...)
-		clientFinal = append(clientFinal, []byte(cp)...)
-		//log.Printf("bin: %08b\n", clientFinal)
-		data = clientFinal
-	}
-
-	if i == 3 { // need to process the final message before starting using
-
-		for i := 1; i <= 5; i++ {
-			responseServer = <-chFromServer
-
-			if getReady(responseServer) {
-				data = append(data, sendFirstQuery()...)
-			}
-		}
-	}
-
-	if i >= 4 {
-		if getResponseUponQuery(responseServer) {
-			data = []byte{}
-		}
-	}
-	return data
+func ReadNextPacket() []byte {
+	return <-chFromServer
 }
 
-func getResponseUponQuery(serverResp []byte) bool {
+func process(i int) {
+	data := make([]byte, 0)
+	buf := new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, int32(4+4+4+1+len(username)+1+9+len(databaseName)+2))
+	data = append(data, buf.Bytes()...)
 
+	data = append(data, 0x00)
+	data = append(data, 0x03)
+	data = append(data, 0x00)
+	data = append(data, 0x00)
+
+	//user (key)
+	data = append(data, 0x75)
+	data = append(data, 0x73)
+	data = append(data, 0x65)
+	data = append(data, 0x72)
+	data = append(data, 0x00)
+
+	buf = new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, []byte(username))
+	data = append(data, buf.Bytes()...)
+	data = append(data, 0x00)
+
+	//database (key) 64 61 74 61 62 61 73 65
+	data = append(data, 0x64)
+	data = append(data, 0x61)
+	data = append(data, 0x74)
+	data = append(data, 0x61)
+	data = append(data, 0x62)
+	data = append(data, 0x61)
+	data = append(data, 0x73)
+	data = append(data, 0x65)
+	data = append(data, 0x00)
+
+	buf = new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, []byte(databaseName))
+	data = append(data, buf.Bytes()...)
+	data = append(data, 0x00)
+
+	data = append(data, 0x00)
+
+	chToServer <- data
+
+	responseServer := ReadNextPacket()
+
+	data = make([]byte, 0)
+	data = append(data, 0x70)
+
+	data = append(data, 0x00)
+	data = append(data, 0x00)
+	data = append(data, 0x00)
+	data = append(data, 0x46)
+
+	data = append(data, []byte{0x53, 0x43, 0x52, 0x41, 0x4D, 0x2D, 0x53, 0x48, 0x41, 0x2D, 0x32, 0x35, 0x36, 0x00}...)
+	data = append(data, []byte{0x00, 0x00, 0x00, 0x30}...)
+
+	firstMsg, _ := conv.Step("")
+	data = append(data, firstMsg...)
+
+	chToServer <- data
+
+	responseServer = ReadNextPacket()
+
+	data = make([]byte, 0)
+	//log.Println("Computing: client-final")
+	x := responseServer
+
+	xx := x[9:]
+	cp := computeClientProof(string(xx))
+	//log.Printf("Client proof [%s]\n", cp)
+
+	clientFinal = append(clientFinal, 'p')
+	buf = new(bytes.Buffer)
+	binary.Write(buf, binary.BigEndian, int32(4+len(cp)))
+	clientFinal = append(clientFinal, buf.Bytes()...)
+	clientFinal = append(clientFinal, []byte(cp)...)
+	//log.Printf("bin: %08b\n", clientFinal)
+	data = clientFinal
+
+	chToServer <- data
+
+	responseServer = ReadNextPacket()
+	//processing AuthenticationSASLFinal (R) (actually skiping it because we trust the server)
+	if responseServer[0] == 'R' {
+		log.Println("SUCCESSFUL AUTHENTICATION OK AS USER 1/2", username)
+	} else {
+		log.Println("COULD NOT AUTHENTICATE AS USER", username)
+		return
+	}
+
+	responseServer = ReadNextPacket()
+	//processing AuthenticationOK (R)
+	if responseServer[0] == 'R' && bytesToInt32(responseServer[5:bytesToInt32(responseServer[1:5])+1]) == 0 {
+		log.Println("SUCCESSFUL AUTHENTICATION OK AS USER 2/2", username)
+	} else {
+		log.Println("COULD NOT AUTHENTICATE AS USER", username)
+		return
+	}
+
+	responseServer = ReadNextPacket()
+	//process ParameterStatus (S)
+	isParamStat := false
+	if responseServer[0] == 'S' {
+		isParamStat = true
+	} else {
+		log.Println("NO ParamStatus were received")
+	}
+	for isParamStat {
+		st := responseServer[5:]
+		newSt := strings.ReplaceAll(string(st), "\x00", "")
+		log.Printf("Param Status %s\n", []byte(newSt))
+		responseServer = ReadNextPacket()
+		if responseServer[0] != 'S' {
+			isParamStat = false
+		}
+	}
+
+	//process BackendKeyData(K)
+	if responseServer[0] == 'K' {
+		procid := bytesToInt32(responseServer[5:9])
+		procsec := bytesToInt32(responseServer[9:13])
+		log.Printf("BackendKeyData: process id: %d\n", procid)
+		log.Printf("BackendKeyData: process secret: %d\n", procsec)
+	} else {
+		log.Println("NO BackendKeyData!")
+	}
+
+	responseServer = ReadNextPacket()
+	//process ReadyForQuery(Z)
+	if responseServer[0] == 'Z' {
+		log.Printf("ReadyForQuery: %c\n", responseServer[len(responseServer)-1])
+		log.Println("ReadyForQuery: (NOTE) 'I' server ready. 'T' server is processing a trx bloc. 'E' server in failed trx block")
+	} else {
+		log.Println("Did not receive ReadyForQuery, server may not be ready yet.")
+		//return false
+	}
+
+	chToServer <- sendFirstQuery()
+
+	responseServer = ReadNextPacket()
 	log.Println("Parsing response from server after seding the query:", query)
 
 	// parsing the RowDescription (T)
-	RowDescLen := bytesToInt32(serverResp[1:5])
-	log.Printf("%d\n", RowDescLen)
-
-	if serverResp[0] == 'T' {
-		numberOfCol := int(bytesToInt16(serverResp[5:7]))
+	if responseServer[0] == 'T' {
+		numberOfCol := int(bytesToInt16(responseServer[5:7]))
 		log.Printf("there are exactly %d columns in this response\n", numberOfCol)
 
 		log.Println("--------------------------------------------------------")
 		j := 7
 		for i := 0; i < numberOfCol; i++ {
 			s := ""
-			for serverResp[j] != 0x00 {
-				s += string(serverResp[j])
+			for responseServer[j] != 0x00 {
+				s += string(responseServer[j])
 				j++
 			}
 			log.Printf("| %s ", s)
@@ -213,47 +249,52 @@ func getResponseUponQuery(serverResp []byte) bool {
 
 	} else {
 		log.Println("there is NO RowDescription, possibly empty data? or an error?")
-		return false
+		return
 	}
-	serverResp = serverResp[RowDescLen+1:]
 
-	for serverResp[0] == 'D' {
+	responseServer = ReadNextPacket()
+	rowNumber := 1
+	for responseServer[0] == 'D' {
 		numOfCols := int16(0)
-		if serverResp[0] == 'D' {
+		log.Println("Row Number: ", rowNumber)
+		if responseServer[0] == 'D' {
 
-			numOfCols = bytesToInt16(serverResp[5:7])
+			numOfCols = bytesToInt16(responseServer[5:7])
 
-			serverResp = serverResp[7:]
+			responseServer = responseServer[7:]
 			for i := 0; i <= int(numOfCols)-1; i++ {
-				lenCol := bytesToInt32(serverResp[:4])
+				lenCol := bytesToInt32(responseServer[:4])
 				if lenCol == -1 {
 					log.Print("| NULL")
 				}
 				if lenCol == 0 {
 					log.Print("| -")
 				} else {
-					columnVal := serverResp[4 : 4+lenCol]
+					columnVal := responseServer[4 : 4+lenCol]
 					log.Printf("| %s", string(columnVal))
 				}
-				serverResp = serverResp[4+lenCol:]
+				responseServer = responseServer[4+lenCol:]
 			}
 			log.Println("--------------------------------------------------------")
 			log.Println("There are", numOfCols, "columns in this row")
 
 		} else {
 			log.Println("No Data rows where found")
-			return false
+			return
 		}
+		rowNumber++
+		responseServer = ReadNextPacket()
 	}
 
-	if serverResp[0] == 'C' {
+	responseServer = ReadNextPacket()
+	if responseServer[0] == 'C' {
 		log.Println("[DONE] receiving a closing command, the command has been executed")
-		serverResp = serverResp[bytesToInt32(serverResp[1:5])+1:]
 	}
-	if serverResp[0] == 'Z' {
+
+	responseServer = ReadNextPacket()
+	if responseServer[0] == 'Z' {
 		log.Println("[READY] ready for query again...")
 	}
-	return true
 }
 
 func sendFirstQuery() []byte {
@@ -270,74 +311,6 @@ func sendFirstQuery() []byte {
 	data = append(data, []byte(query)...)
 	data = append(data, 0x00)
 	return data
-}
-
-/*
-*	this function getReady is written to deconstruct the final tcp packet from the SASL mechanism.
-* 	this packet that we will deconstruct contains (AuthenticationSASLFinal (B) + AuthenticationOk (B) + ParameterStatus (B) + BackendKeyData (B) + ReadyForQuery (B)) consecutively
-*	it return true if everything is okay and ready to send first query
- */
-func getReady(finalAuthMsg []byte) bool {
-
-	//processing AuthenticationSASLFinal (R) (actually skiping it because we trust the server)
-	saslFinalLen := bytesToInt32(finalAuthMsg[1:5])
-	if finalAuthMsg[0] == 'R' {
-		log.Println("SUCCESSFUL AUTHENTICATION OK AS USER 1/2", username)
-	} else {
-		log.Println("COULD NOT AUTHENTICATE AS USER", username)
-		//return false
-	}
-	finalAuthMsg = finalAuthMsg[saslFinalLen+1:]
-
-	//processing AuthenticationOK (R)
-	if finalAuthMsg[0] == 'R' && bytesToInt32(finalAuthMsg[5:bytesToInt32(finalAuthMsg[1:5])+1]) == 0 {
-		log.Println("SUCCESSFUL AUTHENTICATION OK AS USER 2/2", username)
-	} else {
-		log.Println("COULD NOT AUTHENTICATE AS USER", username)
-		//return false
-	}
-	authOKLen := bytesToInt32(finalAuthMsg[1:5])
-	finalAuthMsg = finalAuthMsg[authOKLen+1:]
-
-	//process ParameterStatus (S)
-	isParamStat := false
-	if finalAuthMsg[0] == 'S' {
-		isParamStat = true
-	} else {
-		log.Println("NO ParamStatus were received")
-	}
-	for isParamStat {
-		paramLen := bytesToInt32(finalAuthMsg[1:5])
-		st := finalAuthMsg[5 : paramLen+1]
-		newSt := strings.ReplaceAll(string(st), "\x00", "")
-		log.Printf("Param Status %s\n", []byte(newSt))
-		finalAuthMsg = finalAuthMsg[paramLen+1:]
-		if finalAuthMsg[0] != 'S' {
-			isParamStat = false
-		}
-	}
-
-	//process BackendKeyData(K)
-	if finalAuthMsg[0] == 'K' {
-		keyLen := bytesToInt32(finalAuthMsg[1:5])
-		procid := bytesToInt32(finalAuthMsg[5:9])
-		procsec := bytesToInt32(finalAuthMsg[9:13])
-		log.Printf("BackendKeyData: process id: %d\n", procid)
-		log.Printf("BackendKeyData: process secret: %d\n", procsec)
-		finalAuthMsg = finalAuthMsg[keyLen+1:]
-	} else {
-		log.Println("NO BackendKeyData!")
-	}
-
-	//process ReadyForQuery(Z)
-	if finalAuthMsg[0] == 'Z' {
-		log.Printf("ReadyForQuery: %c\n", finalAuthMsg[len(finalAuthMsg)-1])
-		log.Println("ReadyForQuery: (NOTE) 'I' server ready. 'T' server is processing a trx bloc. 'E' server in failed trx block")
-	} else {
-		log.Println("Did not receive ReadyForQuery, server may not be ready yet.")
-		//return false
-	}
-	return true
 }
 
 func bytesToInt32(b []byte) int32 {

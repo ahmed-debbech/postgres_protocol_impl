@@ -13,9 +13,9 @@ Which made me think: **How hard is it going to be ?!**
 
 No, no, no i am not trying to build a new connector client. There are plenty of them already. 
 
-My obsession with how the underlying stuff are working and how my prod-ready app communicates with a database and what are the behind the scenes of `userRepo.save(user)` (the java/spring realm) and enough curiosity made me do this.
+My obsession with how the underlying stuff is working and how my prod-ready app communicates with a database and what are the behind the scenes of `userRepo.save(user)` (the java/spring realm) and enough curiosity made me do this.
 
-Though. if you finding this helpful for your next Postgres driver, then go ahead and fork it.
+Though. if you find this helpful for your next Postgres driver, then go ahead and fork it.
 
 #### Because it's s a learning process...
 
@@ -28,7 +28,7 @@ I learned about the protocol of my favorite database.
 #### The real meat now.
 
 This is a go implementation for the protocol that does only one single connection and one single query and halts. \
-It is so simple that i still didn't implement everything in the protocol just the main necessary parts: 
+It is so simple, though i still didn't implement everything in the protocol just the main necessary parts:
 * 1- connect 
 * 2- authenticate 
 * 3- send query 
